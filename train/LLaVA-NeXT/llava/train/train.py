@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 import json
 import logging
 import pathlib
-from typing import Dict, Optional, Sequence, List
+from typing import Dict, Optional, Sequence, List, Tuple
 from PIL import Image, ImageFile
 from packaging import version
 import numpy as np
@@ -1049,12 +1049,25 @@ class LazySupervisedDataset(Dataset):
     def modality_lengths(self):
         length_list = []
         for sample in self.list_data_dict:
-            cur_len = sum(len(conv["value"].split()) for conv in sample["conversations"])
-            assert cur_len > 0, f"Conversation length is 0 for {sample}"
-            if "image" in sample or "video" in sample or self.data_args.early_mix_text:
+            # 将问题和答案的文本合并计算长度
+            question_text = sample.get("question", "")
+            answer_text = sample.get("answer", "")
+            
+            # 计算总长度（按词分割）
+            cur_len = len(question_text.split()) + len(answer_text.split())
+            
+            # 保持原有的长度验证
+            assert cur_len > 0, f"Combined text length is 0 for {sample}"
+            
+            # 保持原有的图像/视频逻辑
+            # 注意：新格式中图像在 "image" 列表中
+            if (("image" in sample and sample["image"]) or 
+                "video" in sample or 
+                self.data_args.early_mix_text):
                 length_list.append(cur_len)
             else:
                 length_list.append(-cur_len)
+        
         return length_list
 
     def process_image(self, image_file, overwrite_image_aspect_ratio=None):
@@ -1132,111 +1145,144 @@ class LazySupervisedDataset(Dataset):
             raise e
 
     def _get_item(self, i) -> Dict[str, torch.Tensor]:
+        """
+        获取并处理单个数据样本，支持多模态（图像+文本）和纯文本数据。
+        
+        Args:
+            i: 数据索引
+            
+        Returns:
+            Dict[str, torch.Tensor]: 处理后的数据字典，包含模型训练所需的所有信息
+        """
+        # 第一步：数据准备和标准化
         sources = self.list_data_dict[i]
         if isinstance(i, int):
             sources = [sources]
-        assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+        assert len(sources) == 1, "Don't know why it is wrapped to a list"
 
-        if "image" in sources[0]:
+        # 第二步：将问答格式转换为标准的对话格式
+        for source in sources:
+            if "conversations" not in source:
+                question = source.get("question", "")
+                answer = source.get("answer", "")
+                # 创建标准的对话格式，便于模型处理
+                source["conversations"] = [
+                    {"from": "human", "value": question},
+                    {"from": "assistant", "value": answer}
+                ]
+
+        # 第三步：初始化关键变量
+        image = None
+        has_image = "image" in sources[0]
+        sources_processed = None
+
+        # 第四步：图像处理（如果存在）
+        if has_image:
             image_file = self.list_data_dict[i]["image"]
-            if type(image_file) is list:
-                image = [self.process_image(f) for f in image_file]
-                # Handling multi images
-                # overwrite to process with simple pad 
-                if len(image_file) > 1:
-                    image = [self.process_image(f, "pad") for f in image_file]
-                    image = [[im[0], im[1], "image"] for im in image]
-            else:
-                image = [self.process_image(image_file)]
-            sources = preprocess_multimodal(copy.deepcopy([e["conversations"] for e in sources]), self.data_args)
-
-        elif "video" in sources[0]:
-            video_file = self.list_data_dict[i]["video"]
-            video_folder = self.data_args.video_folder
-            video_file = os.path.join(video_folder, video_file)
-            suffix = video_file.split(".")[-1]
-            if not os.path.exists(video_file):
-                print("File {} not exist!".format(video_file))
-
             try:
-                if "shareVideoGPTV" in video_file:
-                    frame_files = [os.path.join(video_file, f) for f in os.listdir(video_file) if os.path.isfile(os.path.join(video_file, f))]
-                    frame_files.sort()  # Ensure the frames are sorted if they are named sequentially
+                image = self._process_multiple_images(image_file, i)
 
-                    # TODO: Hard CODE: Determine the indices for uniformly sampling 10 frames
-                    if self.data_args.force_sample:
-                        num_frames_to_sample = self.data_args.frames_upbound
-                    else:
-                        num_frames_to_sample = 10
-
-                    avg_fps = 2
-                    
-                    total_frames = len(frame_files)
-                    sampled_indices = np.linspace(0, total_frames - 1, num_frames_to_sample, dtype=int)
-
-
-                    frame_time = [i/2 for i in sampled_indices]
-                    frame_time = ",".join([f"{i:.2f}s" for i in frame_time])
-
-                    video_time = total_frames / avg_fps
-
-                    # Read and store the sampled frames
-                    video = []
-                    for idx in sampled_indices:
-                        frame_path = frame_files[idx]
-                        try:
-                            with Image.open(frame_path) as img:
-                                frame = img.convert("RGB")
-                                video.append(frame)
-                        except IOError:
-                            print(f"Failed to read frame at path: {frame_path}")
-                else:
-                    video, video_time, frame_time, num_frames_to_sample = process_video_with_decord(video_file, self.data_args)
-
-                processor = self.data_args.image_processor
-                image = processor.preprocess(video, return_tensors="pt")["pixel_values"]
-                if self.data_args.add_time_instruction:
-                    time_instruciton = f"The video lasts for {video_time:.2f} seconds, and {num_frames_to_sample} frames are uniformly sampled from it. These frames are located at {frame_time}.Please answer the following questions related to this video."
-                    sources[0]["conversations"][0]["value"] = f'{DEFAULT_IMAGE_TOKEN}\n{time_instruciton}\n{sources[0]["conversations"][0]["value"].replace(DEFAULT_IMAGE_TOKEN, "")}'
-                image = [(image, video[0].size, "video")]
-                sources = preprocess_multimodal(copy.deepcopy([e["conversations"] for e in sources]), self.data_args)
-                # print(sources)
+                # 处理对话数据（包含图像的情况）
+                sources_processed = preprocess_multimodal(
+                    copy.deepcopy([e["conversations"] for e in sources]), 
+                    self.data_args
+                )
+                
             except Exception as e:
-                print(f"Error: {e}")
-                print(f"Failed to read video file: {video_file}")
-                return self._get_item(i + 1)
+                print(f"图像处理错误（样本 {i}）: {str(e)}")
+                image = self._create_zero_tensor()
+                has_image = False  # 降级为纯文本处理
+                sources_processed = copy.deepcopy([e["conversations"] for e in sources])
         else:
-            sources = copy.deepcopy([e["conversations"] for e in sources])
+            # 处理纯文本数据
+            sources_processed = copy.deepcopy([e["conversations"] for e in sources])
 
-        has_image = ("image" in self.list_data_dict[i]) or ("video" in self.list_data_dict[i])
-        data_dict = preprocess(sources, self.tokenizer, has_image=has_image)
-
-        if "prompt" in data_dict:
-            prompt = data_dict["prompt"]
-        else:
-            prompt = None
-
+        # 第五步：创建并填充数据字典
+        data_dict = preprocess(sources_processed, self.tokenizer, has_image=has_image)
+        
+        # 处理单实例情况
         if isinstance(i, int):
             data_dict = dict(input_ids=data_dict["input_ids"][0], labels=data_dict["labels"][0])
 
-        # image exist in the data
-        if "image" in self.list_data_dict[i]:
-            data_dict["image"] = image
-        elif "video" in self.list_data_dict[i]:
+        # 第六步：添加多模态相关数据
+        if has_image:
             data_dict["image"] = image
         elif self.data_args.is_multimodal:
-            # image does not exist in the data, but the model is multimodal
-            crop_size = self.data_args.image_processor.crop_size
-            data_dict["image"] = [
-                (torch.zeros(1, 3, crop_size["height"], crop_size["width"]), (crop_size["width"], crop_size["height"]), "text"),
-            ]
-        # prompt exist in the data
-        if prompt is not None:
-            data_dict["prompt"] = prompt
+            # 为多模态模型提供零张量占位符
+            data_dict["image"] = [self._create_zero_tensor()]
 
+        # 第七步：添加额外信息
+        if "prompt" in data_dict:
+            data_dict["prompt"] = data_dict["prompt"]
         data_dict["id"] = self.list_data_dict[i].get("id", i)
 
         return data_dict
+
+    def _process_multiple_images(self, image_files: List[str], index: int) -> List:
+        """
+        处理多个图像文件，并提供详细的处理状态信息。
+        
+        这个方法会尝试处理所有提供的图像，即使部分图像处理失败也会继续处理其他图像。
+        它实现了一个优雅的降级策略：如果所有图像都处理失败，会提供一个零张量作为后备方案。
+        
+        Args:
+            image_files: 需要处理的图像文件路径列表
+            index: 当前处理的数据样本索引，用于日志记录
+            
+        Returns:
+            List: 处理后的图像列表，每个元素可能是：
+                - 成功处理的图像张量和元数据
+                - 零张量（当所有图像处理失败时）
+        """
+        processed_images = []
+        total_images = len(image_files)
+                
+        # 逐个处理图像，添加详细的状态跟踪
+        for i, image_file in enumerate(image_files, 1):
+            try:                    
+                # 尝试处理图像
+                processed = self.process_image(image_file)
+                
+                if processed is not None:
+                    processed_images.append(processed)
+                    
+            except Exception as e:
+                print(f"错误：处理图像 {i}/{total_images} 时发生异常：{str(e)}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        # 处理结果统计和返回值确定
+        successful_images = len(processed_images)
+        
+        if not processed_images:
+            # print(f"警告：样本 {index} 的所有图像处理失败，使用零张量替代")
+            return [self._create_zero_tensor()]
+        
+        # 根据成功处理的图像数量决定返回格式
+        if len(processed_images) > 1:
+            # 对于多图像情况，确保返回格式正确
+            try:
+                formatted_images = [[im[0], im[1], "image"] for im in processed_images]
+                return formatted_images
+            except Exception as e:
+                print(f"错误：格式化多图像数据时发生错误：{str(e)}")
+                # 如果格式化失败，降级到使用第一张成功的图像
+                print("降级：仅使用第一张成功处理的图像")
+                return [processed_images[0]]
+        
+        # 单图像情况，直接返回处理结果
+        return processed_images
+
+
+    def _create_zero_tensor(self) -> Tuple:
+        """创建零张量作为图像占位符"""
+        crop_size = self.data_args.image_processor.crop_size
+        return (
+            torch.zeros(1, 3, crop_size["height"], crop_size["width"]),
+            (crop_size["width"], crop_size["height"]),
+            "text"
+        )
 
 
 @dataclass
@@ -1389,10 +1435,11 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
             "wizardlm-2" in model_args.model_name_or_path.lower()
             or "vicuna" in model_args.model_name_or_path.lower()
             or "llama" in model_args.model_name_or_path.lower()
-            or "yi" in model_args.model_name_or_path.lower()
+            # or "yi" in model_args.model_name_or_path.lower()
             or "nous-hermes" in model_args.model_name_or_path.lower()
             and "wizard-2" in model_args.model_name_or_path.lower()
         ):
+            print(model_args.model_name_or_path.lower())
             model = LlavaLlamaForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,

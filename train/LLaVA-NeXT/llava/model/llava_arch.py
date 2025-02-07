@@ -273,7 +273,7 @@ class LlavaMetaForCausalLM(ABC):
                     images_list.append(image)
                 else:
                     images_list.append(image.unsqueeze(0))
-
+            
             concat_images = torch.cat([image for image in images_list], dim=0)
             split_sizes = [image.shape[0] for image in images_list]
             encoded_image_features = self.encode_images(concat_images)
