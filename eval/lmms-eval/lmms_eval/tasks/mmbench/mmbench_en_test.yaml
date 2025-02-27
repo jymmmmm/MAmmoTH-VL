@@ -1,0 +1,10 @@
+task: "mmbench_en_test"
+test_split: test
+include: _default_template_mmbench_en_yaml
+metric_list:
+  - metric: submission
+    aggregation: !function en_utils.mmbench_aggregate_test_results
+    higher_is_better: true
+lmms_eval_specific_kwargs:
+  default:
+    post_prompt: "First give the reasoning and then write your final answer in the format 'Answer: X' where X is the option's letter from the given choices. If the answer is not in the choices, please give the closest option."

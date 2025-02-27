@@ -1,0 +1,7 @@
+group: mathvision
+task:
+  - mathvision_cot
+metadata:
+  version: 0.0
+  gpt_eval_model_name: "gpt-4o-mini"
+  quick_extract: false
