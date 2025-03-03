@@ -6,7 +6,9 @@ import pandas as pd
 import yaml
 from loguru import logger as eval_logger
 from openai import AzureOpenAI, OpenAI
-
+import re
+import concurrent.futures
+from typing import List, Dict, Any
 from lmms_eval.tasks.mathvision.eval_utils import find_math_answer, is_equal, is_number
 
 NUM_SECONDS_TO_SLEEP = 5
@@ -107,43 +109,118 @@ def mathvision_doc_to_text(doc, lmms_eval_specific_kwargs=None):
     return query_prompt
 
 
+# def mathvision_gpt_eval_process_results(doc, results):
+#     correct_list = []
+#     for pred in results:
+#         model_answer = pred.strip()
+#         gt_answer = str(doc["answer"])
+#         gpt_response = get_chat_response(JUDGE_RULES.format(question=doc["question"], answer=gt_answer, pred=model_answer), 1024)
+        
+#         # Extract the number from the response, handling potential formats like '[0]' or '0'
+#         try:
+#             # First try to strip brackets if they exist
+#             cleaned_response = gpt_response.strip('[]')
+#             if cleaned_response.isdigit():
+#                 score = int(cleaned_response)
+#             else:
+#                 # If that fails, look for any digit in the response
+#                 import re
+#                 digits = re.findall(r'\d+', gpt_response)
+#                 if digits:
+#                     score = int(digits[0])
+#                 else:
+#                     # Default to 0 if no numeric value found
+#                     score = 0
+                    
+#             if score == 1:
+#                 correct_list.append(True)
+#             else:
+#                 correct_list.append(False)
+#         except Exception as e:
+#             eval_logger.error(f"Error parsing GPT response '{gpt_response}': {e}")
+#             correct_list.append(False)  # Default to incorrect on parsing errors
+
+#     return {
+#         "mathvision_gpt_eval_score": {
+#             "response": results,
+#             "scores": correct_list,
+#         },
+#     }
+
+
 def mathvision_gpt_eval_process_results(doc, results):
-    correct_list = []
+    """
+    并行版本的评估函数，使用线程池同时处理多个预测结果。
+    
+    Args:
+        doc: 包含问题和答案的文档
+        results: 要评估的模型预测结果列表
+        
+    Returns:
+        包含评估分数的字典
+    """
+    # 获取标准答案
+    gt_answer = str(doc["answer"])
+    
+    # 准备评估参数列表
+    eval_params = []
     for pred in results:
         model_answer = pred.strip()
-        gt_answer = str(doc["answer"])
-        gpt_response = get_chat_response(JUDGE_RULES.format(question=doc["question"], answer=gt_answer, pred=model_answer), 1024)
+        prompt = JUDGE_RULES.format(
+            question=doc["question"], 
+            answer=gt_answer, 
+            pred=model_answer
+        )
+        eval_params.append((prompt, 1024))
+    
+    # 使用线程池并行处理所有预测
+    correct_list = []
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        # 并行提交所有请求
+        future_to_index = {
+            executor.submit(get_chat_response, prompt, max_tokens): i 
+            for i, (prompt, max_tokens) in enumerate(eval_params)
+        }
         
-        # Extract the number from the response, handling potential formats like '[0]' or '0'
+        # 收集结果（按提交顺序）
+        results_list = [None] * len(results)
+        for future in concurrent.futures.as_completed(future_to_index):
+            index = future_to_index[future]
+            try:
+                gpt_response = future.result()
+                results_list[index] = gpt_response
+            except Exception as e:
+                eval_logger.error(f"Error in API call: {e}")
+                results_list[index] = ""
+    
+    # 处理所有响应
+    for gpt_response in results_list:
         try:
-            # First try to strip brackets if they exist
+            # 首先尝试去除可能存在的括号
             cleaned_response = gpt_response.strip('[]')
             if cleaned_response.isdigit():
                 score = int(cleaned_response)
             else:
-                # If that fails, look for any digit in the response
-                import re
+                # 如果失败，查找响应中的任何数字
                 digits = re.findall(r'\d+', gpt_response)
                 if digits:
                     score = int(digits[0])
                 else:
-                    # Default to 0 if no numeric value found
+                    # 如果没有找到数字，默认为0
                     score = 0
                     
-            if score == 1:
-                correct_list.append(True)
-            else:
-                correct_list.append(False)
+            correct_list.append(score == 1)
         except Exception as e:
             eval_logger.error(f"Error parsing GPT response '{gpt_response}': {e}")
-            correct_list.append(False)  # Default to incorrect on parsing errors
-
+            correct_list.append(False)  # 解析错误时默认为不正确
+    
     return {
         "mathvision_gpt_eval_score": {
             "response": results,
             "scores": correct_list,
         },
     }
+
 
 def mathvision_process_results(doc, results):
     correct_list = []
