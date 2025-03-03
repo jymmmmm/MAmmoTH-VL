@@ -6,6 +6,7 @@ import pandas as pd
 import yaml
 from loguru import logger as eval_logger
 from openai import AzureOpenAI, OpenAI
+import requests
 
 from lmms_eval.tasks.mathvision.eval_utils import find_math_answer, is_equal, is_number
 import re
@@ -145,9 +146,14 @@ def dynamath_doc_to_text(doc, lmms_eval_specific_kwargs=None):
 #     }
 
 
+import re
+import concurrent.futures
+from typing import List, Dict, Any
+from tqdm import tqdm
+
 def dynamath_gpt_eval_process_results(doc, results):
     """
-    并行版本的DynaMath评估函数，使用线程池同时处理多个预测结果。
+    并行版本的DynaMath评估函数，使用线程池同时处理多个预测结果，并显示进度条。
     
     Args:
         doc: 包含问题和标准答案的文档
@@ -170,46 +176,64 @@ def dynamath_gpt_eval_process_results(doc, results):
         )
         eval_params.append((prompt, 1024))
     
-    # 使用线程池并行处理所有预测
+    # 使用线程池并行处理所有预测，并添加进度条
     correct_list = []
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        # 并行提交所有请求
-        future_to_index = {
-            executor.submit(get_chat_response, prompt, max_tokens): i 
-            for i, (prompt, max_tokens) in enumerate(eval_params)
-        }
-        
-        # 收集结果（按提交顺序）
-        results_list = [None] * len(results)
-        for future in concurrent.futures.as_completed(future_to_index):
-            index = future_to_index[future]
-            try:
-                gpt_response = future.result()
-                results_list[index] = gpt_response
-            except Exception as e:
-                eval_logger.error(f"Error in API call: {e}")
-                results_list[index] = ""
+    results_list = [None] * len(results)
     
-    # 处理所有响应
-    for gpt_response in results_list:
-        try:
-            # 首先尝试去除可能存在的括号
-            cleaned_response = gpt_response.strip('[]')
-            if cleaned_response.isdigit():
-                score = int(cleaned_response)
-            else:
-                # 如果失败，查找响应中的任何数字
-                digits = re.findall(r'\d+', gpt_response)
-                if digits:
-                    score = int(digits[0])
-                else:
-                    # 如果没有找到数字，默认为0
-                    score = 0
+    # 创建进度条
+    with tqdm(total=len(results), desc="评估进度", unit="预测") as pbar:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+            # 并行提交所有请求
+            future_to_index = {
+                executor.submit(get_chat_response, prompt, max_tokens): i 
+                for i, (prompt, max_tokens) in enumerate(eval_params)
+            }
+            
+            # 收集结果（按完成顺序更新进度条）
+            for future in concurrent.futures.as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    gpt_response = future.result()
+                    results_list[index] = gpt_response
                     
-            correct_list.append(score == 1)
-        except Exception as e:
-            eval_logger.error(f"Error parsing GPT response '{gpt_response}': {e}")
-            correct_list.append(False)  # 解析错误时默认为不正确
+                    # 解析响应
+                    try:
+                        # 首先尝试去除可能存在的括号
+                        cleaned_response = gpt_response.strip('[]')
+                        if cleaned_response.isdigit():
+                            score = int(cleaned_response)
+                        else:
+                            # 如果失败，查找响应中的任何数字
+                            digits = re.findall(r'\d+', gpt_response)
+                            if digits:
+                                score = int(digits[0])
+                            else:
+                                # 如果没有找到数字，默认为0
+                                score = 0
+                                
+                        # 在获取结果后立即更新正确列表
+                        while len(correct_list) <= index:
+                            correct_list.append(None)
+                        correct_list[index] = (score == 1)
+                    except Exception as e:
+                        eval_logger.error(f"Error parsing GPT response '{gpt_response}': {e}")
+                        while len(correct_list) <= index:
+                            correct_list.append(None)
+                        correct_list[index] = False  # 解析错误时默认为不正确
+                except Exception as e:
+                    eval_logger.error(f"Error in API call: {e}")
+                    results_list[index] = ""
+                    while len(correct_list) <= index:
+                        correct_list.append(None)
+                    correct_list[index] = False
+                
+                # 更新进度条
+                pbar.update(1)
+    
+    # 确保结果列表完整且顺序正确
+    while None in correct_list:
+        index = correct_list.index(None)
+        correct_list[index] = False
     
     return {
         "dynamath_gpt_eval_score": {
@@ -217,7 +241,6 @@ def dynamath_gpt_eval_process_results(doc, results):
             "scores": correct_list,
         },
     }
-
 
 
 def dynamath_process_results(doc, results):
