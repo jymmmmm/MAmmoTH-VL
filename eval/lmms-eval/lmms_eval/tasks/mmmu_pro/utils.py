@@ -42,6 +42,7 @@ def parse_VWImodel_response(response):
         answer = answer_part.split(":")[-1].strip().strip("., ")
         
         return answer
+        # return response
         
     except Exception as e:
         print(f"Error parsing response: {e}")

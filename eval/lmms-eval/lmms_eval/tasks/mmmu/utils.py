@@ -14,6 +14,8 @@ from lmms_eval.tasks._task_utils.file_utils import generate_submission_file
 
 MULTI_CHOICE_PROMPT = "First give the reasoning and then write your final answer in the format 'Answer: X' where X is the option's letter from the given choices. If the answer is not in the choices, please give the closest option."
 OPEN_ENDED_PROMPT = "First give the reasoning and then write your final answer in the format 'Answer: X' where X is a single word or phrase that answers the question."
+# MULTI_CHOICE_PROMPT = "Write your final answer in the format 'Answer: X' where X is the option's letter from the given choices. If the answer is not in the choices, please give the closest option."
+# OPEN_ENDED_PROMPT = "Write your final answer in the format 'Answer: X' where X is a single word or phrase that answers the question."
 
 with open(Path(__file__).parent / "_default_template_yaml", "r") as f:
     raw_data = f.readlines()
