@@ -12,8 +12,8 @@ from loguru import logger as eval_logger
 
 from lmms_eval.tasks._task_utils.file_utils import generate_submission_file
 
-MULTI_CHOICE_PROMPT = "First give the reasoning and then write your final answer in the format 'Answer: X' where X is the option's letter from the given choices. If the answer is not in the choices, please give the closest option."
-OPEN_ENDED_PROMPT = "First give the reasoning and then write your final answer in the format 'Answer: X' where X is a single word or phrase that answers the question."
+MULTI_CHOICE_PROMPT = "First think step by step and then write your final answer in the format 'Answer: X' where X is the option's letter from the given choices. You should not give None answer."
+OPEN_ENDED_PROMPT = "First think step by step and then write your final answer in the format 'Answer: X' where X is a single word or phrase or number that answers the question."
 # MULTI_CHOICE_PROMPT = "Write your final answer in the format 'Answer: X' where X is the option's letter from the given choices. If the answer is not in the choices, please give the closest option."
 # OPEN_ENDED_PROMPT = "Write your final answer in the format 'Answer: X' where X is a single word or phrase that answers the question."
 

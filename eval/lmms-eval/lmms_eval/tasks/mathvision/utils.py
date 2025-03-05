@@ -147,7 +147,10 @@ def mathvision_doc_to_text(doc, lmms_eval_specific_kwargs=None):
 #             "scores": correct_list,
 #         },
 #     }
-
+import re
+import concurrent.futures
+from typing import List, Dict, Any
+from tqdm import tqdm
 
 def mathvision_gpt_eval_process_results(doc, results):
     """
