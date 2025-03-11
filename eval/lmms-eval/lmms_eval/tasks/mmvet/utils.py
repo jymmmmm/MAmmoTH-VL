@@ -48,7 +48,7 @@ Can you explain this meme? | This meme is poking fun at the fact that the names 
 """
 
 
-def get_chat_response(prompt, model=GPT_EVAL_MODEL_NAME, temperature=0.0, max_tokens=128, patience=3, sleep_time=5):
+def get_chat_response(prompt, model=GPT_EVAL_MODEL_NAME, temperature=0.0, max_tokens=128, patience=3, sleep_time=1):
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
@@ -79,8 +79,12 @@ def get_chat_response(prompt, model=GPT_EVAL_MODEL_NAME, temperature=0.0, max_to
             )
             response.raise_for_status()
             response_data = response.json()
+            
 
             content = response_data["choices"][0]["message"]["content"].strip()
+            print("*****************************")
+            print(content)
+            print("*****************************")
             if content != "":
                 return content, response_data["model"]
 
@@ -120,6 +124,8 @@ def mmvet_process_results(doc, results):
                 score = float(content)
                 if 0.0 <= score <= 1.0:
                     grade_sample_run_complete = True
+                print(f"Score: {score}")
+                print("completed" + question)
             except ValueError:
                 time.sleep(5)
                 temperature += 0.5
